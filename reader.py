@@ -137,18 +137,6 @@ block_utilization_df = df.groupBy("block_number") \
 spark_stream = SparkSession.builder.appName("Stream processing").getOrCreate()
 
 
-# HIGH VALUE TRANSACTION ALERTS
-
-threshold_value = 1000
-high_value_transactions = df_stream.filter(col("value") > threshold_value)
-high_utilization_blocks = block_utilization_df.filter(col("utilization") > 90)
-high_utilization_blocks.show()
-num_of_blocks = block_utilization_df.count()
-
-print("Number of blocks", num_of_blocks)
-print("Number of high_utilization_blocks (over 90%) {} - {}".format(high_utilization_blocks.count(), round(high_utilization_blocks.count()/num_of_blocks * 100), 2))
-
-
 # TRANSACTION SPEED VARIANCE BASED ON GAS PRICE
 
 transaction_speed_df = (df.withColumn("gas_price_gwei", col(Columns.GAS_PRICE)/1E9)
