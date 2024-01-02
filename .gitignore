@@ -1,3 +1,4 @@
 *.parquet
 /env
 .idea
+/data

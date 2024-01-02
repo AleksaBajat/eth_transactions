@@ -27,14 +27,14 @@ class Columns:
     LAST_MODIFIED = "last_modified"
 
 
-sample_name = "part-00000-ae4c7c88-aeae-4100-9e25-08fc7f3ea308-c000.snappy.parquet"
+spark = (SparkSession.builder.master("local")
+         .appName("Batch Processing")
+         #.config("spark.mongodb.output.uri", "mongodb://mongo:27017/data")
+         .getOrCreate())
 
-spark = SparkSession.builder.master("local").appName("Batch Processing").getOrCreate()
-df = spark.read.parquet(sample_name)
+namenode_uri = os.environ.get("CORE_CONF_fs_defaultFS");
 
-print("Size of the data sample {}MB".format(os.path.getsize(sample_name)/1024/1024))
-print("Number of rows {}".format(df.count()))
-
+df = spark.read.parquet(namenode_uri + "/data")
 
 reference_df = (df.select(Columns.GAS_UNITS, Columns.GAS_PRICE, Columns.VALUE)
           .withColumn("gas_price_gwei", col(Columns.GAS_PRICE)/1E9)
