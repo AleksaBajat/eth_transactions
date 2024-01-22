@@ -75,7 +75,7 @@ services:
       - "9092:9092"
     environment:
       KAFKA_BROKER_RACK: 0
-      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
       KAFKA_UNCLEAN_LEADER_ELECTION_ENABLE: "false"
       KAFKA_DELETE_TOPIC_ENABLE: "true"
       KAFKA_ADVERTISED_LISTENERS: LISTENER_DOCKER_INTERNAL://kafka:19092,LISTENER_DOCKER_EXTERNAL://${DOCKER_HOST_IP:-127.0.0.1}:9092
@@ -89,6 +89,7 @@ services:
       - kafka:/var/lib/kafka/data
     depends_on:
       - zookeeper
+      - mongo
 
   zookeeper:
     image: zookeeper:3.9.1
@@ -112,6 +113,31 @@ services:
     environment:
       AIRFLOW_HOME: "/app/airflow"
 
+  producer:
+    build: ./streaming/producer/
+    container_name: producer
+    hostname: producer
+    environment:
+      KAFKA_BROKER: "kafka:19092"
+    env_file:
+      - ./streaming/producer/.env
+    depends_on:
+      - kafka
+      - zookeeper
+      - mongo
+
+  consumer:
+    build: ./streaming/consumer/
+    container_name: consumer
+    hostname: consumer
+    environment:
+      KAFKA_BROKER: "kafka:19092"
+    env_file:
+      - ./streaming/consumer/.env
+    depends_on:
+      - kafka
+      - zookeeper
+      - mongo
 
 volumes:
   hadoop_namenode:

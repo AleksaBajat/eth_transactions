@@ -5,6 +5,7 @@ name = "pypi"
 
 [packages]
 pyspark = "*"
+python-decouple = "*"
 
 [dev-packages]
 
