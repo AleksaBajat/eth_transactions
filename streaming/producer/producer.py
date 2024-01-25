@@ -1,6 +1,7 @@
 import pytz
 import time
 from kafka import KafkaProducer
+from kafka.errors import KafkaError
 from decouple import config
 import requests, json, traceback
 from datetime import datetime, timedelta
@@ -55,7 +56,26 @@ def create_query() -> str:
     return query
 
 
-producer = KafkaProducer(bootstrap_servers=KAFKA_BROKER, value_serializer=lambda v: json.dumps(v).encode('utf-8'))
+def get_kafka_producer(broker_url):
+    while True:
+        try:
+            producer = KafkaProducer(bootstrap_servers=KAFKA_BROKER, value_serializer=lambda v: json.dumps(v).encode('utf-8'))
+            if producer.bootstrap_connected():
+                logger.info("Kafka broker is available.")
+                return producer
+            else:
+                logger.warning("Failed to connect to Kafka broker.")
+                time.sleep(15)
+                logger.warning("Retrying to connect to Kafka broker...")
+                continue;
+        except KafkaError as e:
+            logger.warning("Failed to connect to Kafka broker.")
+            time.sleep(15)
+            logger.warning("Retrying to connect to Kafka broker...")
+
+
+producer = get_kafka_producer(KAFKA_BROKER)
+
 while True:
     try:
         query = create_query()

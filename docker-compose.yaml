@@ -41,6 +41,12 @@ services:
       - mongo:/data/db
     ports:
       - "27017:27017"
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "'db.stats()'"]
+      interval: 5s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
 
   spark_master:
     image: bde2020/spark-master:3.2.1-hadoop3.2
@@ -73,6 +79,11 @@ services:
     user: root
     ports:
       - "9092:9092"
+    healthcheck:
+      test: ["CMD", "kafka-topics", "--list", "--bootstrap-server", "localhost:9092"]
+      interval: 5s
+      timeout: 10s
+      retries: 5
     environment:
       KAFKA_BROKER_RACK: 0
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
@@ -122,9 +133,12 @@ services:
     env_file:
       - ./streaming/producer/.env
     depends_on:
-      - kafka
-      - zookeeper
-      - mongo
+      kafka:
+        condition: service_healthy
+      zookeeper:
+        condition: service_started
+      mongo:
+        condition: service_healthy
 
   consumer:
     build: ./streaming/consumer/
@@ -135,9 +149,12 @@ services:
     env_file:
       - ./streaming/consumer/.env
     depends_on:
-      - kafka
-      - zookeeper
-      - mongo
+      kafka:
+        condition: service_healthy
+      zookeeper:
+        condition: service_started
+      mongo:
+        condition: service_healthy
 
 volumes:
   hadoop_namenode:
