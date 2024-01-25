@@ -14,7 +14,7 @@ class Columns:
     GAS = "gas"
     GAS_PRICE = "gas_price"
     INPUT = "input"
-    TOTAL_GAS_USED = "receipt_cumulative_gas_used"
+    RECEIPT_CUMULATIVE_GAS_USED = "receipt_cumulative_gas_used"
     RECEIPT_GAS_USED = "receipt_gas_used"
     ADDRESS_CREATED = "receipt_contact_address"
     TRANSACTION_STATUS = "receipt_status"
@@ -42,10 +42,11 @@ eth = spark.read.parquet(namenode_uri + "/data")
 # GAS PRICE
 
 gas_price_data = (
-    eth.select(Columns.GAS)
-    .withColumn("gas_price_gwei", F.col(Columns.GAS) / 1e9)
-    .withColumn("gas_price_eth", F.col(Columns.GAS) / 1e18)
-    .withColumn("gas_price_euro", F.col(Columns.GAS) / 1e18 * 1851)
+    eth.select(Columns.HASH, Columns.GAS, Columns.GAS_PRICE)
+    .withColumn("total_gas_cost_wei", F.col(Columns.GAS) * F.col(Columns.GAS_PRICE))
+    .withColumn("gas_price_gwei", F.col("total_gas_cost_wei") / 1e9)
+    .withColumn("gas_price_eth", F.col("total_gas_cost_wei") / 1e18)
+    .withColumn("gas_price_euro", (F.col("total_gas_cost_wei") / 1e18) * 1851)
 ).orderBy(F.desc("gas_price_euro"))
 
 (
@@ -56,24 +57,17 @@ gas_price_data = (
     .save()
 )
 
-# RANKED TRANSACTIONS
+# MOST ACTIVE SENDER-RECIEVER PAIRS
 
-window_spec = Window.orderBy(F.desc(Columns.VALUE))
-ranked_transactions = eth.withColumn("rank", F.rank().over(window_spec))
-ranked_transactions = ranked_transactions.select(
-    Columns.DATE,
-    Columns.HASH,
-    Columns.FROM_ADDRESS,
-    Columns.TO_ADDRESS,
-    Columns.VALUE,
-    "rank",
-)
+sender_receiver_pairs = eth.groupBy(Columns.FROM_ADDRESS, Columns.TO_ADDRESS) \
+    .agg(F.count("*").alias("total_transactions")) \
+    .orderBy(F.col("total_transactions").desc())
 
 (
-    ranked_transactions.write.format("mongo")
+    sender_receiver_pairs.write.format("mongo")
     .mode("overwrite")
     .option("database", "eth_transactions")
-    .option("collection", "ranked_transactions")
+    .option("collection", "most_active_pairs")
     .save()
 )
 
@@ -93,7 +87,7 @@ gas_stats = gas_stats.select(
     gas_stats.write.format("mongo")
     .mode("overwrite")
     .option("database", "eth_transactions")
-    .option("collection", "gas_per_transaction")
+    .option("collection", "gas_usage_by_address")
     .save()
 )
 
@@ -152,24 +146,24 @@ hourly_transaction_counts = (
 )
 
 
-# TRANSACTION SPEED VARIANCE BASED ON GAS PRICE
+# CUMULATIVE GAS USAGE
 
-transaction_speed = (
-    eth.withColumn("gas_price_gwei", F.col(Columns.GAS_PRICE) / 1e9)
-    .withColumn(
-        "transaction_duration",
-        F.unix_timestamp(Columns.LAST_MODIFIED)
-        - F.unix_timestamp(Columns.BLOCK_TIMESTAMP),
-    )
-    .groupBy("gas_price_gwei")
-    .agg(F.avg("transaction_duration").alias("average_duration"))
-)
+cumulative_gas_window = Window.partitionBy(F.to_date(Columns.BLOCK_TIMESTAMP), F.hour(Columns.BLOCK_TIMESTAMP))\
+                              .orderBy(Columns.BLOCK_TIMESTAMP)\
+                              .rowsBetween(Window.unboundedPreceding, Window.currentRow)
+
+# Calculate the cumulative gas usage on an hourly basis
+hourly_gas_usage = eth.withColumn("hour", F.hour(Columns.BLOCK_TIMESTAMP))\
+                      .withColumn("cumulative_gas_used", F.sum(Columns.RECEIPT_CUMULATIVE_GAS_USED).over(cumulative_gas_window))\
+                      .groupBy("hour")\
+                      .agg(F.max("cumulative_gas_used").alias("total_gas_used"))\
+                      .orderBy("hour")
 
 (
-    transaction_speed.write.format("mongo")
+    hourly_gas_usage.write.format("mongo")
     .mode("overwrite")
     .option("database", "eth_transactions")
-    .option("collection", "transaction_speed")
+    .option("collection", "hourly_gas_usage")
     .save()
 )
 
@@ -194,24 +188,23 @@ block_utilization_df = (
 
 # GAS USAGE AND FEE ANALYSIS PER TRANSACTION TYPE
 
-window_spec = Window.partitionBy(Columns.TRANSACTION_TYPE)
-
-stats_by_type = (
-    eth.withColumn("avg_gas_used", F.avg(Columns.RECEIPT_GAS_USED).over(window_spec))
-    .withColumn("max_gas_used", F.max(Columns.RECEIPT_GAS_USED).over(window_spec))
-    .withColumn("min_gas_used", F.min(Columns.RECEIPT_GAS_USED).over(window_spec))
-    .withColumn("avg_gas_price", F.avg(Columns.GAS_PRICE).over(window_spec))
-    .withColumn("max_gas_price", F.max(Columns.GAS_PRICE).over(window_spec))
-    .withColumn("min_gas_price", F.min(Columns.GAS_PRICE).over(window_spec))
-    .withColumn(
-        "efficiency_ratio", F.col(Columns.RECEIPT_GAS_USED) / F.col(Columns.GAS)
-    )
-    .withColumn("avg_fee", F.avg(Columns.MAX_FEE_PER_GAS).over(window_spec))
-    .withColumn("max_fee", F.max(Columns.MAX_FEE_PER_GAS).over(window_spec))
-    .withColumn("min_fee", F.min(Columns.MAX_FEE_PER_GAS).over(window_spec))
+stats_by_type = eth.groupBy(Columns.TRANSACTION_TYPE).agg(
+    F.avg(Columns.RECEIPT_GAS_USED).alias("avg_gas_used"),
+    F.max(Columns.RECEIPT_GAS_USED).alias("max_gas_used"),
+    F.min(Columns.RECEIPT_GAS_USED).alias("min_gas_used"),
+    F.avg(Columns.GAS_PRICE).alias("avg_gas_price"),
+    F.max(Columns.GAS_PRICE).alias("max_gas_price"),
+    F.min(Columns.GAS_PRICE).alias("min_gas_price"),
+    F.avg(Columns.MAX_FEE_PER_GAS).alias("avg_fee"),
+    F.max(Columns.MAX_FEE_PER_GAS).alias("max_fee"),
+    F.min(Columns.MAX_FEE_PER_GAS).alias("min_fee")
 )
 
-stats_by_type.select(
+stats_by_type = stats_by_type.withColumn(
+    "efficiency_ratio", F.col("avg_gas_used") / F.col("avg_gas_price")
+)
+
+stats_by_type = stats_by_type.select(
     Columns.TRANSACTION_TYPE,
     "avg_gas_used",
     "max_gas_used",
@@ -219,11 +212,11 @@ stats_by_type.select(
     "avg_gas_price",
     "max_gas_price",
     "min_gas_price",
-    "efficiency_ratio",
     "avg_fee",
     "max_fee",
     "min_fee",
-).distinct().show()
+    "efficiency_ratio"
+)
 
 (
     stats_by_type.write.format("mongo")
@@ -238,25 +231,20 @@ stats_by_type.select(
 
 categorized_transactions = eth.withColumn(
     "type",
-    F.when(F.col(Columns.INPUT) == "0x", "simple_transfer").otherwise(
+    F.when(F.col(Columns.INPUT) == '0x', "simple_transfer").otherwise(
         "contract_interaction"
     ),
 )
 
+print("COUNT######################################## {}".format(categorized_transactions.count()))
+
 transaction_counts = categorized_transactions.groupBy("type").count()
-total_transactions = categorized_transactions.count()
-
-percentage_transactions = transaction_counts.withColumn(
-    "percentage", (F.col("count") / F.col("total") * 100)
-)
-
-percentage_transactions = percentage_transactions.select("transaction_type", "percentage")
 
 (
-    percentage_transactions.write.format("mongo")
+    transaction_counts.write.format("mongo")
     .mode("overwrite")
     .option("database", "eth_transactions")
-    .option("collection", "transaction_type_percentage")
+    .option("collection", "transaction_counts")
     .save()
 )
 
