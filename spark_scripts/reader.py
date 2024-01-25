@@ -1,7 +1,7 @@
 import os
-from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, round as sround, avg as savg, max as smax, sum as ssum, unix_timestamp, hour, count, window, coalesce
-from logging import info
+from pyspark.sql import SparkSession, Window
+from pyspark.sql import functions as F
+
 
 class Columns:
     DATE = "date"
@@ -11,96 +11,254 @@ class Columns:
     FROM_ADDRESS = "from_address"
     TO_ADDRESS = "to_address"
     VALUE = "value"
-    GAS_UNITS = "gas"
+    GAS = "gas"
     GAS_PRICE = "gas_price"
     INPUT = "input"
     TOTAL_GAS_USED = "receipt_cumulative_gas_used"
-    TRANSACTION_GAS_USED = "receipt_gas_used"
+    RECEIPT_GAS_USED = "receipt_gas_used"
     ADDRESS_CREATED = "receipt_contact_address"
     TRANSACTION_STATUS = "receipt_status"
     BLOCK_TIMESTAMP = "block_timestamp"
     BLOCK_NUMBER = "block_number"
     BLOCK_HASH = "block_hash"
-    TOTAL_FEE = "max_fee_per_gas"
+    MAX_FEE_PER_GAS = "max_fee_per_gas"
     PRIORITY_FEE = "max_priority_fee_per_gas"
     TRANSACTION_TYPE = "transaction_type"
     GAS_PRICE_EF = "receipt_effective_gas_price"
     LAST_MODIFIED = "last_modified"
 
 
-spark = (SparkSession.builder.master("local")
-         .appName("Batch Processing")
-         .config("spark.mongodb.output.uri", "mongodb://mongo:27017/eth_transactions")
-         .getOrCreate())
+spark = (
+    SparkSession.builder.master("local")
+    .appName("Batch Processing")
+    .config("spark.mongodb.output.uri", "mongodb://mongo:27017/eth_transactions")
+    .getOrCreate()
+)
 
-namenode_uri = os.environ.get("CORE_CONF_fs_defaultFS");
+namenode_uri = os.environ.get("CORE_CONF_fs_defaultFS")
 
-df = spark.read.parquet(namenode_uri + "/data")
+eth = spark.read.parquet(namenode_uri + "/data")
 
+# GAS PRICE
 
-bt_df = (df.select(Columns.GAS_PRICE, Columns.GAS_UNITS, Columns.VALUE, Columns.TRANSACTION_STATUS)
-          .withColumn("gas_price_gwei", col(Columns.GAS_PRICE)/1E9)
-          .withColumn("gas_price_eth", col(Columns.GAS_PRICE)/1E18)
-          .withColumn("gas_price_euro", col(Columns.GAS_PRICE)/1E18 * 1851)
-          .withColumn("total_price_euro", col(Columns.GAS_UNITS) * col("gas_price_euro"))
-          .withColumn("value_euro", col(Columns.VALUE)/1E18 * 1851)
-               ).where(col(Columns.VALUE) != 0.0)
-bt_df_sorted = bt_df.orderBy(col("total_price_euro").desc())
+gas_price_data = (
+    eth.select(Columns.GAS)
+    .withColumn("gas_price_gwei", F.col(Columns.GAS) / 1e9)
+    .withColumn("gas_price_eth", F.col(Columns.GAS) / 1e18)
+    .withColumn("gas_price_euro", F.col(Columns.GAS) / 1e18 * 1851)
+).orderBy(F.desc("gas_price_euro"))
 
-bt_df_sorted.write.format("mongo").mode("overwrite").option("database", "eth_transactions").option("collection", "transactions").save()
+(
+    gas_price_data.write.format("mongo")
+    .mode("overwrite")
+    .option("database", "eth_transactions")
+    .option("collection", "gas_pricing")
+    .save()
+)
 
-# SMART CONTRACT INTERACTIONS VS TRANSFERS
+# RANKED TRANSACTIONS
 
-contract_interactions = (df.select(Columns.INPUT).where(col(Columns.INPUT) != '0x'))
-simple_transfers = (df.select(Columns.INPUT).where(col(Columns.INPUT) == '0x'))
+window_spec = Window.orderBy(F.desc(Columns.VALUE))
+ranked_transactions = eth.withColumn("rank", F.rank().over(window_spec))
+ranked_transactions = ranked_transactions.select(
+    Columns.DATE,
+    Columns.HASH,
+    Columns.FROM_ADDRESS,
+    Columns.TO_ADDRESS,
+    Columns.VALUE,
+    "rank",
+)
 
-contract_interactions.write.format("mongo").mode("overwrite").option("database", "eth_transactions").option("collection", "contract_interactions").save()
-simple_transfers.write.format("mongo").mode("overwrite").option("database", "eth_transactions").option("collection", "simple_transfers").save()
+(
+    ranked_transactions.write.format("mongo")
+    .mode("overwrite")
+    .option("database", "eth_transactions")
+    .option("collection", "ranked_transactions")
+    .save()
+)
 
+# GAS USAGE PER ADDRESS
 
-# TOP ACCOUNTS BY TRANSACTION VOLUME
+window_spec = Window.partitionBy(Columns.FROM_ADDRESS)
+gas_stats = (
+    eth.withColumn("avg_gas_used", F.avg(Columns.GAS).over(window_spec))
+    .withColumn("max_gas_used", F.max(Columns.GAS).over(window_spec))
+    .withColumn("min_gas_used", F.min(Columns.GAS).over(window_spec))
+)
+gas_stats = gas_stats.select(
+    "from_address", "avg_gas_used", "max_gas_used", "min_gas_used"
+).distinct()
 
-ta_df = (df.select(Columns.FROM_ADDRESS)
-         .union(df.select(Columns.TO_ADDRESS))
-         .groupBy(Columns.FROM_ADDRESS)
-         .count()
-         .orderBy(col("count").desc()))
+(
+    gas_stats.write.format("mongo")
+    .mode("overwrite")
+    .option("database", "eth_transactions")
+    .option("collection", "gas_per_transaction")
+    .save()
+)
 
-# existing_ta_df = spark.read.format("mongo").option("uri", "mongodb://mongo:27017/eth_transactions").load()
-ta_df.write.format("mongo").mode("overwrite").option("database", "eth_transactions").option("collection", "top_accounts").save()
-# combined_df = ta_df.join(existing_df, ta_df[Columns.FROM_ADDRESS] == existing_df[Columns.FROM_ADDRESS], "outer")
-# updated_df = combined_df.withColumn("count", coalesce(ta_df["count"], 0) + coalesce(existing_df["count"], 0))
-# updated_df.write.format("mongo").option("upsert", "true").option("database", "eth_transactions").option("collection", "top_accounts").save()
+# ADDRESS ACTIVITY
 
-# MOST ACTIVE HOURS
+window_spec = Window.partitionBy(Columns.FROM_ADDRESS)
+active_addresses = eth.withColumn(
+    "transaction_count", F.count(Columns.HASH).over(window_spec)
+)
+active_addresses = (
+    active_addresses.select(Columns.FROM_ADDRESS, "transaction_count")
+    .distinct()
+    .orderBy(F.desc("transaction_count"))
+)
+(
+    active_addresses.write.format("mongo")
+    .mode("overwrite")
+    .option("database", "eth_transactions")
+    .option("collection", "address_activity")
+    .save()
+)
 
-hourly_transaction_counts = (df.withColumn("hour", hour(Columns.BLOCK_TIMESTAMP))
-                                .groupBy("hour")
-                                .agg(count("*").alias("num_transactions"))
-                                .orderBy("num_transactions", ascending=False))
+# ADDRESS TRANSACTION VOLUME
 
-hourly_transaction_counts.write.format("mongo").mode("overwrite").option("database", "eth_transactions").option("collection", "hourly_transaction_counts").save()
+address_transaction_volume = (
+    eth.select(Columns.FROM_ADDRESS)
+    .union(eth.select(Columns.TO_ADDRESS))
+    .groupBy(Columns.FROM_ADDRESS)
+    .count()
+    .orderBy(F.col("count").desc())
+)
+
+(
+    address_transaction_volume.write.format("mongo")
+    .mode("overwrite")
+    .option("database", "eth_transactions")
+    .option("collection", "address_transaction_volume")
+    .save()
+)
+
+# ACTIVE HOURS
+
+hourly_transaction_counts = (
+    eth.withColumn("hour", F.hour(Columns.BLOCK_TIMESTAMP))
+    .groupBy("hour")
+    .agg(F.count("*").alias("num_transactions"))
+    .orderBy("num_transactions", ascending=False)
+)
+
+(
+    hourly_transaction_counts.write.format("mongo")
+    .mode("overwrite")
+    .option("database", "eth_transactions")
+    .option("collection", "hourly_activity")
+    .save()
+)
+
 
 # TRANSACTION SPEED VARIANCE BASED ON GAS PRICE
 
-transaction_speed_df = (df.withColumn("gas_price_gwei", col(Columns.GAS_PRICE)/1E9)
-            .withColumn("transaction_duration",
-                 unix_timestamp(Columns.LAST_MODIFIED) - unix_timestamp(Columns.BLOCK_TIMESTAMP)) \
-                      .groupBy("gas_price_gwei") \
-                          .agg(savg("transaction_duration").alias("average_duration")))
+transaction_speed = (
+    eth.withColumn("gas_price_gwei", F.col(Columns.GAS_PRICE) / 1e9)
+    .withColumn(
+        "transaction_duration",
+        F.unix_timestamp(Columns.LAST_MODIFIED)
+        - F.unix_timestamp(Columns.BLOCK_TIMESTAMP),
+    )
+    .groupBy("gas_price_gwei")
+    .agg(F.avg("transaction_duration").alias("average_duration"))
+)
 
-transaction_speed_df.write.format("mongo").mode("overwrite").option("database", "eth_transactions").option("collection", "transaction_speed").save()
+(
+    transaction_speed.write.format("mongo")
+    .mode("overwrite")
+    .option("database", "eth_transactions")
+    .option("collection", "transaction_speed")
+    .save()
+)
 
 # BLOCKS REACHING GAS LIMIT
 
 GAS_LIMIT = 30000000  # Maximum size of the block
 
-block_utilization_df = df.groupBy("block_number") \
-    .agg(ssum(Columns.TRANSACTION_GAS_USED).alias("total_gas_used")) \
-    .withColumn("utilization", (col("total_gas_used") / GAS_LIMIT) * 100)
+block_utilization_df = (
+    eth.groupBy("block_number")
+    .agg(F.sum(Columns.RECEIPT_GAS_USED).alias("total_gas_used"))
+    .withColumn("utilization", (F.col("total_gas_used") / GAS_LIMIT) * 100)
+)
 
-block_utilization_df.write.format("mongo").mode("overwrite").option("database", "eth_transactions").option("collection", "block_utilization").save()
+(
+    block_utilization_df.write.format("mongo")
+    .mode("overwrite")
+    .option("database", "eth_transactions")
+    .option("collection", "block_utilization")
+    .save()
+)
+
+
+# GAS USAGE AND FEE ANALYSIS PER TRANSACTION TYPE
+
+window_spec = Window.partitionBy(Columns.TRANSACTION_TYPE)
+
+stats_by_type = (
+    eth.withColumn("avg_gas_used", F.avg(Columns.RECEIPT_GAS_USED).over(window_spec))
+    .withColumn("max_gas_used", F.max(Columns.RECEIPT_GAS_USED).over(window_spec))
+    .withColumn("min_gas_used", F.min(Columns.RECEIPT_GAS_USED).over(window_spec))
+    .withColumn("avg_gas_price", F.avg(Columns.GAS_PRICE).over(window_spec))
+    .withColumn("max_gas_price", F.max(Columns.GAS_PRICE).over(window_spec))
+    .withColumn("min_gas_price", F.min(Columns.GAS_PRICE).over(window_spec))
+    .withColumn(
+        "efficiency_ratio", F.col(Columns.RECEIPT_GAS_USED) / F.col(Columns.GAS)
+    )
+    .withColumn("avg_fee", F.avg(Columns.MAX_FEE_PER_GAS).over(window_spec))
+    .withColumn("max_fee", F.max(Columns.MAX_FEE_PER_GAS).over(window_spec))
+    .withColumn("min_fee", F.min(Columns.MAX_FEE_PER_GAS).over(window_spec))
+)
+
+stats_by_type.select(
+    Columns.TRANSACTION_TYPE,
+    "avg_gas_used",
+    "max_gas_used",
+    "min_gas_used",
+    "avg_gas_price",
+    "max_gas_price",
+    "min_gas_price",
+    "efficiency_ratio",
+    "avg_fee",
+    "max_fee",
+    "min_fee",
+).distinct().show()
+
+(
+    stats_by_type.write.format("mongo")
+    .mode("overwrite")
+    .option("database", "eth_transactions")
+    .option("collection", "efficiency_analysis")
+    .save()
+)
+
+
+## SMART CONTRACT INTERACTIONS VS TRANSFERS
+
+categorized_transactions = eth.withColumn(
+    "type",
+    F.when(F.col(Columns.INPUT) == "0x", "simple_transfer").otherwise(
+        "contract_interaction"
+    ),
+)
+
+transaction_counts = categorized_transactions.groupBy("type").count()
+total_transactions = categorized_transactions.count()
+
+percentage_transactions = transaction_counts.withColumn(
+    "percentage", (F.col("count") / F.col("total") * 100)
+)
+
+percentage_transactions = percentage_transactions.select("transaction_type", "percentage")
+
+(
+    percentage_transactions.write.format("mongo")
+    .mode("overwrite")
+    .option("database", "eth_transactions")
+    .option("collection", "transaction_type_percentage")
+    .save()
+)
 
 
 spark.stop()
-

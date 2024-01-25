@@ -115,15 +115,6 @@ services:
       - zookeeper_data:/data
       - zookeeper_log:/datalog
 
-  airflow:
-    build: ./workflows
-    container_name: airflow
-    hostname: airflow
-    ports:
-      - "9080:9080"
-    environment:
-      AIRFLOW_HOME: "/app/airflow"
-
   producer:
     build: ./streaming/producer/
     container_name: producer

@@ -5,6 +5,7 @@ name = "pypi"
 
 [packages]
 pyspark = "*"
+pyspark-stubs = "==3.0.0.post3"
 
 [dev-packages]
 
