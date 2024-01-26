@@ -1,6 +1,6 @@
-from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, from_json, current_timestamp, explode, isnotnull, struct, length, isnull
-from pyspark.sql.types import StringType, StructType, StructField, ArrayType, DoubleType, IntegerType
+from pyspark.sql import SparkSession, Window
+from pyspark.sql import functions as F
+from pyspark.sql.types import StringType, StructType, StructField, ArrayType, DoubleType, IntegerType, LongType
 from decouple import config
 import logging
 import time
@@ -15,43 +15,94 @@ def write_eth_transactions(batch_df, batch_id):
         logger.info("WRITING")
         print("WRITING")
 
-
-
-        for row in batch_df.rdd.toLocalIterator():
-            data = row.data
-            timestamp = row.timestamp
-            print("DATA {} : TIMESTAMP {}".format(data, timestamp))
-
-        batch_df.select("data").printSchema()
-
-        df_eth_transactions = batch_df.select(
-            explode(col("data.data.ethereum.transactions")).alias("transactions"),
-            col("timestamp")
-        ).select(
-            col("transactions.count").alias("count"),
-            col("transactions.gasprice").alias("gasprice"),
-            col("timestamp")
+        ## Count of each transaction type in batch
+        exploded_df = batch_df.select(
+            F.explode(F.col("data.data.ethereum.transactions")).alias("transaction")
         )
 
-        df_smart_contract_calls = batch_df.select(
-            explode(col("data.data.ethereum.smartContractCalls")).alias("smartContractCalls"),
-            col("timestamp")
+        window_spec = Window.partitionBy("transaction.txType").orderBy("transaction.hash")
+
+        tx_type_running_count = exploded_df.withColumn(
+            "running_count",
+            F.row_number().over(window_spec)
+        ).withColumn(
+            "txType",
+            F.when(F.col("transaction.txType") != "", F.col("transaction.txType")).otherwise(2)
         ).select(
-            col("smartContractCalls.count").alias("count"),
-            col("smartContractCalls.amount").alias("amount"),
-            col("timestamp")
+            F.col("txType"),
+            F.col("running_count")
         )
 
-        (df_eth_transactions.write.format("mongo")
+        (tx_type_running_count.write.format("mongo")
        .option("database", "eth_transactions")
-       .option("collection", "real_time_transactions")
+       .option("collection", "rt_transaction_type_count")
        .mode("append").save())
 
+        # Cumulative average gas price and gas used
+#        for row in exploded_df.toLocalIterator():
+#            logging.info(row)
+#
+#        avg_gas_metrics = exploded_df.agg(
+#            F.avg(F.col("transaction.gas").cast("float")).alias("average_gas"),
+#            F.avg(F.col("transaction.gasPrice").cast("float")).alias("average_gas_price")
+#        ).select("average_gas", "average_gas_price")
+#
+#        for row in avg_gas_metrics.toLocalIterator():
+#            logging.info(row)
+#
+#        (avg_gas_metrics.write.format("mongo")
+#       .option("database", "eth_transactions")
+#       .option("collection", "rt_average_gas")
+#       .mode("append").save())
 
-        (df_smart_contract_calls.write.format("mongo")
-        .option("database", "eth_transactions")
-        .option("collection", "smart_contract_calls")
-        .mode("append").save())
+        # Transactions by gas value
+
+        window_spec = Window.partitionBy("transaction.hash").orderBy(F.desc("transaction.gasValue"))
+
+        top_gas_value_transactions_ranked = exploded_df.withColumn(
+            "gas_value_rank",
+            F.rank().over(window_spec)
+            ).select("transaction.hash","transaction.gasValue", "gas_value_rank")
+
+        (top_gas_value_transactions_ranked.write.format("mongo")
+       .option("database", "eth_transactions")
+       .option("collection", "rt_transactions_value")
+       .mode("append").save())
+
+        # Cumulative count of transactions by sender address
+
+        window_spec = Window.partitionBy("transaction.sender.address").orderBy("transaction.hash").rowsBetween(Window.unboundedPreceding, Window.unboundedFollowing)
+
+        transactions_by_sender_cumulative = exploded_df.withColumn(
+            "cumulative_count",
+            F.count("transaction.hash").over(window_spec)
+        ).select("transaction.sender.address", "cumulative_count")
+
+        (transactions_by_sender_cumulative.write.format("mongo")
+       .option("database", "eth_transactions")
+       .option("collection", "rt_transactions_by_sender")
+       .mode("append").save())
+
+        # Nonce value summary - number of transactions prior
+
+        window_spec = Window.orderBy("transaction.hash").rowsBetween(Window.unboundedPreceding, Window.unboundedFollowing)
+
+        nonce_summary_running = exploded_df.withColumn(
+            "running_min_nonce",
+            F.min("transaction.nonce").over(window_spec)
+        ).withColumn(
+            "running_max_nonce",
+            F.max("transaction.nonce").over(window_spec)
+        ).withColumn(
+            "running_avg_nonce",
+            F.avg("transaction.nonce").over(window_spec)
+        ).select("transaction.hash","transaction.sender.address", "running_min_nonce", "running_max_nonce", "running_avg_nonce")
+
+        (nonce_summary_running.write.format("mongo")
+       .option("database", "eth_transactions")
+       .option("collection", "rt_nonce_summary")
+       .mode("append").save())
+
 
         logger.info("SAVED")
         print("SAVED")
@@ -74,16 +125,25 @@ topic = "real_time_eth"
 schema = StructType([
     StructField("data", StructType([
         StructField("ethereum", StructType([
-            StructField("smartContractCalls", ArrayType(
-                StructType([
-                    StructField("count", IntegerType(), False),
-                    StructField("amount", DoubleType(), False)
-                ]),
-            ), False),
             StructField("transactions", ArrayType(
-                StructType([
-                    StructField("count", IntegerType(), False),
-                    StructField("gasPrice", DoubleType(), False)
+                    StructType([
+                    StructField("block", StructType([
+                        StructField("timestamp", StructType([
+                            StructField("iso8601", StringType(), True)
+                        ]), True)
+                    ]), True),
+                    StructField("gas", DoubleType(), True),
+                    StructField("gasPrice", DoubleType(), True),
+                    StructField("gasValue", DoubleType(), True),
+                    StructField("hash", StringType(), True),
+                    StructField("nonce", LongType(), True),
+                    StructField("sender", StructType([
+                        StructField("address", StringType(), True)
+                    ]), True),
+                    StructField("to", StructType([
+                        StructField("address", StringType(), True)
+                    ]), True),
+                    StructField("txType", StringType(), True)
                 ])
             ), False)
         ]), False)
@@ -114,9 +174,9 @@ while True:
 
 
 df_parsed = df.select(
-    from_json(col("value").cast("string"), schema).alias("data"),
-    col("timestamp")
-).filter(col("data").isNotNull())
+    F.from_json(F.col("value").cast("string"), schema).alias("data"),
+    F.col("timestamp")
+).filter(F.col("data").isNotNull())
 
 
 query_df_parsed = df_parsed.writeStream.foreachBatch(write_eth_transactions).start()

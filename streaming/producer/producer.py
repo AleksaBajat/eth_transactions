@@ -40,18 +40,31 @@ def create_query() -> str:
 
     query = f'''{{
   ethereum {{
-    smartContractCalls(
-      time: {{since: "{start_time_iso}", till: "{end_time_iso}"}}
-    ) {{
-      count
-      amount
-    }}
-    transactions(time: {{since: "{start_time_iso}", till: "{end_time_iso}"}}) {{
-      count
-      gasPrice(amount: {{}})
+    transactions(
+        time: {{since: "{start_time_iso}", till: "{end_time_iso}"}}
+        options: {{ desc: "block.timestamp.iso8601", limit: 100 }})
+        {{
+          block {{
+            timestamp {{
+              iso8601
+            }}
+          }}
+          gas
+          gasPrice
+          gasValue
+          hash
+          nonce
+          sender {{
+            address
+          }}
+          to {{
+            address
+          }}
+          txType
+        }}
     }}
   }}
-}}'''
+'''
 
     return query
 
