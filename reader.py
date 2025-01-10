@@ -134,27 +134,27 @@ block_utilization_df = df.groupBy("block_number") \
     .agg(ssum(Columns.TRANSACTION_GAS_USED).alias("total_gas_used")) \
     .withColumn("utilization", (col("total_gas_used") / GAS_LIMIT) * 100)
 
-spark_stream = SparkSession.builder.appName("Stream processing").getOrCreate()
-
-
-# TRANSACTION SPEED VARIANCE BASED ON GAS PRICE
-
-transaction_speed_df = (df.withColumn("gas_price_gwei", col(Columns.GAS_PRICE)/1E9)
-            .withColumn("transaction_duration",
-                 unix_timestamp(Columns.LAST_MODIFIED) - unix_timestamp(Columns.BLOCK_TIMESTAMP)) \
-                      .groupBy("gas_price_gwei") \
-                          .agg(savg("transaction_duration").alias("average_duration")))
-
-transaction_speed_df.show()
-
-# MOST ACTIVE HOURS
-
-hourly_transaction_counts = (df.withColumn("hour", hour(Columns.BLOCK_TIMESTAMP))
-                                .groupBy("hour")
-                                .agg(count("*").alias("num_transactions"))
-                                .orderBy("num_transactions", ascending=False))
-
-hourly_transaction_counts.show()
-
-spark.stop()
-
+# spark_stream = SparkSession.builder.appName("Stream processing").getOrCreate()
+#
+#
+# # TRANSACTION SPEED VARIANCE BASED ON GAS PRICE
+#
+# transaction_speed_df = (df.withColumn("gas_price_gwei", col(Columns.GAS_PRICE)/1E9)
+#             .withColumn("transaction_duration",
+#                  unix_timestamp(Columns.LAST_MODIFIED) - unix_timestamp(Columns.BLOCK_TIMESTAMP)) \
+#                       .groupBy("gas_price_gwei") \
+#                           .agg(savg("transaction_duration").alias("average_duration")))
+#
+# transaction_speed_df.show()
+#
+# # MOST ACTIVE HOURS
+#
+# hourly_transaction_counts = (df.withColumn("hour", hour(Columns.BLOCK_TIMESTAMP))
+#                                 .groupBy("hour")
+#                                 .agg(count("*").alias("num_transactions"))
+#                                 .orderBy("num_transactions", ascending=False))
+#
+# hourly_transaction_counts.show()
+#
+# spark.stop()
+#

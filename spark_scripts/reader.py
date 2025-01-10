@@ -1,6 +1,7 @@
 import os
 from pyspark.sql import SparkSession, Window
 from pyspark.sql import functions as F
+import logging
 
 
 class Columns:
@@ -27,13 +28,18 @@ class Columns:
     GAS_PRICE_EF = "receipt_effective_gas_price"
     LAST_MODIFIED = "last_modified"
 
+logger = logging.getLogger('py4j')
+logger.setLevel(logging.INFO)
 
 spark = (
     SparkSession.builder.master("local")
     .appName("Batch Processing")
     .config("spark.mongodb.output.uri", "mongodb://mongo:27017/eth_transactions")
+    .master("spark://spark-master:7077")
     .getOrCreate()
 )
+
+spark.sparkContext.setLogLevel(logLevel="INFO")
 
 namenode_uri = os.environ.get("CORE_CONF_fs_defaultFS")
 
@@ -48,6 +54,8 @@ gas_price_data = (
     .withColumn("gas_price_eth", F.col("total_gas_cost_wei") / 1e18)
     .withColumn("gas_price_euro", (F.col("total_gas_cost_wei") / 1e18) * 1851)
 ).orderBy(F.desc("gas_price_euro"))
+
+logger.info(gas_price_data)
 
 (
     gas_price_data.write.format("mongo")
@@ -236,7 +244,7 @@ categorized_transactions = eth.withColumn(
     ),
 )
 
-print("COUNT######################################## {}".format(categorized_transactions.count()))
+logger.info("COUNT######################################## {}".format(categorized_transactions.count()))
 
 transaction_counts = categorized_transactions.groupBy("type").count()
 

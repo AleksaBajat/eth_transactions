@@ -15,6 +15,10 @@ services:
     ports:
       - "9870:9870"
       - "9000:9000"
+    ulimits:
+      nofile:
+        soft: "65536"
+        hard: "65536"
 
   datanode:
     image: "bde2020/hadoop-datanode:2.0.0-hadoop3.2.1-java8"
@@ -25,6 +29,10 @@ services:
       - namenode
     volumes:
       - hadoop_datanode:/hadoop/dfs/data
+    ulimits:
+      nofile:
+        soft: "65536"
+        hard: "65536"
 
   metabase:
     image: metabase/metabase:latest
@@ -53,8 +61,10 @@ services:
     container_name: spark_master
     ports:
       - "8080:8080"
+      - "8081:8081"
     environment:
       PYSPARK_PYTHON: python3
+    hostname: spark-master
     env_file:
       - ./hadoop.env
     volumes:
@@ -68,7 +78,7 @@ services:
     environment:
       SPARK_MASTER: spark://spark-master:7077
     ports:
-      - 8081:8081
+      - 8082:8082
     env_file:
       - ./hadoop.env
 
